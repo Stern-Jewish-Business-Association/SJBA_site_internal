@@ -90,3 +90,33 @@
 .login-form button:hover {
   background: #1e293b;
 }
+
+.home-section button {
+  margin-top: 0.25rem;
+  border: none;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #ffffff;
+  padding: 0.7rem 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.home-section button:hover {
+  background: #1e293b;
+}
+
+.home-section button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.error-text {
+  color: #b91c1c;
+  margin-top: 0.75rem;
+}
+
+.notes-list {
+  margin-top: 0.75rem;
+  padding-left: 1rem;
+}

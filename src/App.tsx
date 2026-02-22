@@ -1,3 +1,5 @@
+//App is the actual app page. Where it starts from? what it returns.
+
 import './App.css'
 import { LoginPage } from './pages/LoginPage'
 import { HomePage } from './pages/HomePage'
@@ -13,7 +15,7 @@ function App() {
         <h1 className="app-title">Admin Panel</h1>
         <nav className="app-nav">
           <a href="/">Login</a>
-          {/* <a href="/dashboard">Dashboard</a> */}
+          <a href="/dashboard">Dashboard</a>
         </nav>
       </header>
 
