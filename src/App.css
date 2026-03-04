@@ -37,7 +37,7 @@
 }
 
 .login-section,
-.home-section {
+.auth-section {
   width: 100%;
   max-width: 420px;
   background: #ffffff;
@@ -91,7 +91,13 @@
   background: #1e293b;
 }
 
-.home-section button {
+.auth-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.auth-actions button {
   margin-top: 0.25rem;
   border: none;
   border-radius: 8px;
@@ -102,13 +108,23 @@
   cursor: pointer;
 }
 
-.home-section button:hover {
+.auth-actions button:hover {
   background: #1e293b;
 }
 
-.home-section button:disabled {
+.auth-actions button:disabled,
+.login-form button:disabled {
   opacity: 0.65;
   cursor: not-allowed;
+}
+
+.secondary-button {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.secondary-button:hover {
+  background: #cbd5e1;
 }
 
 .error-text {
@@ -116,7 +132,12 @@
   margin-top: 0.75rem;
 }
 
-.notes-list {
-  margin-top: 0.75rem;
-  padding-left: 1rem;
+.api-response {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 0.85rem;
+  overflow-x: auto;
 }
