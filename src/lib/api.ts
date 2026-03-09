@@ -5,8 +5,9 @@ if (!backendUrl) {
 }
 
 export const fetchAdminRoute = async (accessToken: string): Promise<unknown> => {
-  const response = await fetch(`${backendUrl}/v1/admin`, {
-    method: 'GET',
+  // placeholder, use POST /v1/events endpoint for now to test authentication for admin only requests
+  const response = await fetch(`${backendUrl}/v1/events`, {
+    method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },

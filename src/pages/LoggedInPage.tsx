@@ -24,7 +24,7 @@ export function LoggedInPage({
 
       <div className="auth-actions">
         <button type="button" onClick={() => void onTestBackend()} disabled={isTestingBackend}>
-          {isTestingBackend ? 'Testing backend...' : 'Test /v1/admin'}
+          {isTestingBackend ? 'Testing backend...' : 'Test POST /v1/events'}
         </button>
         <button type="button" className="secondary-button" onClick={() => void onSignOut()}>
           Sign out
