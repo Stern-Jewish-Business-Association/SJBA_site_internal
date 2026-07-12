@@ -18,6 +18,8 @@ A React admin panel for the Stern Jewish Business Association website.
 
 - [CONTRIBUTING.md](./CONTRIBUTING.md)
 - [AGENTS.md](./AGENTS.md)
+- [Admin workflows](./docs/admin-workflows.md)
+- [Local admin safety](./docs/local-admin-safety.md)
 
 ## Contact
 
