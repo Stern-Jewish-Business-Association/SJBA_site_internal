@@ -1,7 +1,7 @@
 import './App.css'
 
 import type { FormEvent } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import {
   Archive,
@@ -47,15 +47,18 @@ import { ADMIN_IDLE_TIMEOUT_MS, useIdleSignOut } from './lib/useIdleSignOut'
 import { AdminApiClient, AdminApiError, createAdminApiClient, fileToBase64 } from './lib/adminApi'
 import type { LocalProductionSafetyStatus } from './lib/adminApi'
 import {
-  createJpegThumbnail,
+  createMediaVariants,
+  getJsonByteSize,
   getStoragePublicUrl,
   getThumbnailPath,
   makeStoragePath,
+  versionUrl,
 } from './lib/adminMedia'
 import type {
   AdminResourceKey,
   AdminResourceRow,
   Event as AdminEvent,
+  MediaReplacementBody,
   ResourcePayload,
   SiteConfigItem,
   StorageBucket,
@@ -73,7 +76,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { Button, buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   Dialog,
@@ -124,7 +127,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Toaster } from '@/components/ui/sonner'
 
-type FieldType = 'text' | 'email' | 'url' | 'textarea' | 'number' | 'datetime' | 'boolean'
+type FieldType =
+  'text' | 'email' | 'url' | 'textarea' | 'number' | 'datetime' | 'boolean' | 'duration' | 'media'
 
 interface FieldConfig {
   key: string
@@ -157,7 +161,6 @@ interface ResourceConfig {
     bucketId: string
     fieldKey: string
     label: string
-    pathPrefix: string
   }
 }
 
@@ -183,16 +186,15 @@ const RESOURCE_CONFIGS: ResourceConfig[] = [
       { key: 'title', label: 'Title', type: 'text', required: true, wide: true },
       { key: 'company', label: 'Company', type: 'text' },
       { key: 'startTime', label: 'Start Date & Time', type: 'datetime', required: true },
-      { key: 'endTime', label: 'End Date & Time', type: 'datetime' },
-      { key: 'location', label: 'Location', type: 'text' },
-      { key: 'semester', label: 'Semester', type: 'text', required: true, placeholder: 'S26' },
+      { key: 'eventDuration', label: 'Event Length', type: 'duration', required: true },
+      { key: 'location', label: 'Location', type: 'text', required: true },
+      { key: 'semester', label: 'Semester', type: 'text', required: true },
       { key: 'isVisible', label: 'Visible on website', type: 'boolean' },
       { key: 'rsvpLink', label: 'RSVP Link', type: 'url' },
       {
         key: 'flyerFile',
-        label: 'Flyer File',
-        type: 'text',
-        placeholder: 'events/panel.jpg',
+        label: 'Uploaded Image',
+        type: 'media',
         wide: true,
       },
       { key: 'description', label: 'Description', type: 'textarea', wide: true },
@@ -201,7 +203,6 @@ const RESOURCE_CONFIGS: ResourceConfig[] = [
       bucketId: 'event-flyers',
       fieldKey: 'flyerFile',
       label: 'Flyer',
-      pathPrefix: 'events',
     },
   },
   {
@@ -226,14 +227,13 @@ const RESOURCE_CONFIGS: ResourceConfig[] = [
       { key: 'year', label: 'Year', type: 'text' },
       { key: 'hometown', label: 'Hometown', type: 'text' },
       { key: 'linkedinUrl', label: 'LinkedIn URL', type: 'url' },
-      { key: 'headshotFile', label: 'Headshot File', type: 'text', wide: true },
+      { key: 'headshotFile', label: 'Uploaded Image', type: 'media', wide: true },
       { key: 'bio', label: 'Bio', type: 'textarea', wide: true },
     ],
     media: {
       bucketId: 'board-headshots',
       fieldKey: 'headshotFile',
       label: 'Headshot',
-      pathPrefix: 'members',
     },
   },
   {
@@ -252,7 +252,7 @@ const RESOURCE_CONFIGS: ResourceConfig[] = [
     fields: [
       { key: 'firstName', label: 'First Name', type: 'text', required: true },
       { key: 'lastName', label: 'Last Name', type: 'text', required: true },
-      { key: 'semester', label: 'Semester', type: 'text', required: true, placeholder: 'S26' },
+      { key: 'semester', label: 'Semester', type: 'text', required: true },
       { key: 'email', label: 'Email', type: 'email' },
     ],
   },
@@ -350,6 +350,19 @@ const RESOURCE_CONFIGS: ResourceConfig[] = [
   },
 ]
 
+const EVENT_DURATION_OPTIONS = [
+  { minutes: 30, label: '30 minutes' },
+  { minutes: 60, label: '1 hour' },
+  { minutes: 90, label: '1 hour 30 minutes' },
+  { minutes: 120, label: '2 hours' },
+  { minutes: 180, label: '3 hours' },
+] as const
+
+const DEFAULT_EVENT_DURATION_MINUTES = 60
+const MAX_MEDIA_REQUEST_BYTES = Math.floor(9.5 * 1024 * 1024)
+const PROTECTED_MEDIA_BUCKETS = new Set(['event-flyers', 'board-headshots'])
+const SEMESTER_CODE_PATTERN = /^[SF]\d{2}$/
+
 const readRow = (row: AdminResourceRow, key: string): unknown =>
   (row as unknown as Record<string, unknown>)[key]
 
@@ -400,6 +413,19 @@ const toDateTimeInput = (value: unknown) => {
   )}:${pad(date.getMinutes())}`
 }
 
+const getEventDurationMinutes = (row?: AdminResourceRow) => {
+  if (!row) return DEFAULT_EVENT_DURATION_MINUTES
+  const startTime = readRow(row, 'startTime')
+  const endTime = readRow(row, 'endTime')
+  if (typeof startTime !== 'string' || typeof endTime !== 'string') {
+    return DEFAULT_EVENT_DURATION_MINUTES
+  }
+  const duration = Math.round((new Date(endTime).getTime() - new Date(startTime).getTime()) / 60000)
+  return EVENT_DURATION_OPTIONS.some((option) => option.minutes === duration)
+    ? duration
+    : DEFAULT_EVENT_DURATION_MINUTES
+}
+
 const makeInitialForm = (config: ResourceConfig, row?: AdminResourceRow): ResourcePayload => {
   const payload: ResourcePayload = {}
   for (const field of config.fields) {
@@ -410,6 +436,8 @@ const makeInitialForm = (config: ResourceConfig, row?: AdminResourceRow): Resour
       payload[field.key] = typeof value === 'number' ? value : 0
     } else if (field.type === 'datetime') {
       payload[field.key] = toDateTimeInput(value)
+    } else if (field.type === 'duration') {
+      payload[field.key] = getEventDurationMinutes(row)
     } else {
       payload[field.key] =
         field.key === 'rsvpLink' && !row
@@ -426,7 +454,9 @@ const preparePayload = (fields: FieldConfig[], form: ResourcePayload) => {
   const payload: ResourcePayload = {}
   for (const field of fields) {
     const raw = form[field.key]
-    if (field.type === 'boolean') {
+    if (field.type === 'duration') {
+      continue
+    } else if (field.type === 'boolean') {
       payload[field.key] = Boolean(raw)
     } else if (field.type === 'number') {
       payload[field.key] = Number(raw || 0)
@@ -465,6 +495,11 @@ interface MediaStatus {
   thumbnail: { exists: boolean; url: string }
 }
 
+interface SemesterUsage {
+  events: number
+  members: number
+}
+
 const getDefaultSort = (config: ResourceConfig): SortState => ({
   key:
     config.key === 'events'
@@ -495,6 +530,8 @@ interface ResourceScreenProps {
   api: AdminApiClient
   config: ResourceConfig
   onAdminError: (error: unknown) => void
+  sort: SortState
+  onSortChange: (sort: SortState) => void
   readOnly?: boolean
   onDirtyChange?: (dirty: boolean) => void
 }
@@ -503,17 +540,20 @@ function ResourceScreen({
   api,
   config,
   onAdminError,
+  sort,
+  onSortChange,
   readOnly = false,
   onDirtyChange,
 }: ResourceScreenProps) {
   const [rows, setRows] = useState<AdminResourceRow[]>([])
   const [query, setQuery] = useState('')
   const [visibilityFilter, setVisibilityFilter] = useState('all')
-  const [sort, setSort] = useState<SortState>(() => getDefaultSort(config))
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [isReordering, setIsReordering] = useState(false)
+  const [reorderMode, setReorderMode] = useState(false)
   const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dragTargetId, setDragTargetId] = useState<string | null>(null)
   const [sheetOpen, setSheetOpen] = useState(false)
   const [editingRow, setEditingRow] = useState<AdminResourceRow | null>(null)
   const [form, setForm] = useState<ResourcePayload>(() => makeInitialForm(config))
@@ -523,13 +563,29 @@ function ResourceScreen({
   const [formError, setFormError] = useState('')
   const [mediaStatus, setMediaStatus] = useState<MediaStatus | null>(null)
   const [mediaStatusLoading, setMediaStatusLoading] = useState(false)
+  const [pendingMediaFile, setPendingMediaFile] = useState<File | null>(null)
   const [previewAsset, setPreviewAsset] = useState<{ title: string; url: string } | null>(null)
+  const nestedDialogCloseGuardUntil = useRef(0)
+  const [semesterOptions, setSemesterOptions] = useState<string[]>([])
+  const [semesterOptionsLoading, setSemesterOptionsLoading] = useState(false)
+  const [semesterUsage, setSemesterUsage] = useState<SemesterUsage | null>(null)
+  const [semesterUsageLoading, setSemesterUsageLoading] = useState(false)
+  const [semesterUsageError, setSemesterUsageError] = useState(false)
 
   const isDirty = useMemo(
-    () => sheetOpen && !readOnly && JSON.stringify(form) !== JSON.stringify(baselineForm),
-    [baselineForm, form, readOnly, sheetOpen]
+    () =>
+      sheetOpen &&
+      !readOnly &&
+      (pendingMediaFile !== null || JSON.stringify(form) !== JSON.stringify(baselineForm)),
+    [baselineForm, form, pendingMediaFile, readOnly, sheetOpen]
   )
   const mediaPath = config.media ? String(form[config.media.fieldKey] ?? '') : ''
+  const mediaVersion = editingRow
+    ? String(
+        readRow(editingRow, config.key === 'board-members' ? 'headshotUpdatedAt' : 'updatedAt') ??
+          ''
+      )
+    : ''
 
   useEffect(() => {
     onDirtyChange?.(isDirty)
@@ -557,6 +613,77 @@ function ResourceScreen({
   useEffect(() => {
     void loadRows()
   }, [loadRows])
+
+  const needsSemesterOptions = config.fields.some((field) => field.key === 'semester')
+
+  useEffect(() => {
+    if (!needsSemesterOptions) {
+      setSemesterOptions([])
+      return
+    }
+
+    let cancelled = false
+    setSemesterOptionsLoading(true)
+    void api
+      .listResource<AdminResourceRow>('semesters')
+      .then((semesters) => {
+        if (cancelled) return
+        const options = semesters
+          .map((semester) => readRow(semester, 'semesterName'))
+          .filter(
+            (semester): semester is string => typeof semester === 'string' && Boolean(semester)
+          )
+          .sort((left, right) =>
+            left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
+          )
+        setSemesterOptions(options)
+      })
+      .catch(onAdminError)
+      .finally(() => {
+        if (!cancelled) setSemesterOptionsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [api, needsSemesterOptions, onAdminError])
+
+  useEffect(() => {
+    if (!sheetOpen || config.key !== 'semesters' || !editingRow) {
+      setSemesterUsage(null)
+      setSemesterUsageLoading(false)
+      setSemesterUsageError(false)
+      return
+    }
+
+    let cancelled = false
+    const semesterCode = String(readRow(editingRow, 'semesterName') ?? '')
+    setSemesterUsage(null)
+    setSemesterUsageLoading(true)
+    setSemesterUsageError(false)
+
+    void api
+      .getSemesterUsage(resourceId(config, editingRow), semesterCode)
+      .then((usage) => {
+        if (cancelled) return
+        setSemesterUsage({
+          events: usage.events,
+          members: usage.members,
+        })
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setSemesterUsageError(true)
+        onAdminError(error)
+      })
+      .finally(() => {
+        if (!cancelled) setSemesterUsageLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [api, config, editingRow, onAdminError, sheetOpen])
 
   const filteredRows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase()
@@ -586,7 +713,7 @@ function ResourceScreen({
   }, [config.columns, config.key, config.searchKeys, query, rows, sort, visibilityFilter])
 
   const refreshMediaStatus = useCallback(
-    async (path: string) => {
+    async (path: string, version: string) => {
       if (!config.media || !path) {
         setMediaStatus(null)
         return
@@ -610,22 +737,28 @@ function ResourceScreen({
         setMediaStatus({
           original: {
             exists: Boolean(original),
-            url: original?.publicUrl ?? getStoragePublicUrl(config.media.bucketId, path),
+            url: versionUrl(
+              original?.publicUrl ?? getStoragePublicUrl(config.media.bucketId, path),
+              version
+            ),
           },
           thumbnail: {
             exists: Boolean(thumbnail),
-            url: thumbnail?.publicUrl ?? getStoragePublicUrl(config.media.bucketId, thumbnailPath),
+            url: versionUrl(
+              thumbnail?.publicUrl ?? getStoragePublicUrl(config.media.bucketId, thumbnailPath),
+              version
+            ),
           },
         })
       } catch (error) {
         setMediaStatus({
           original: {
             exists: false,
-            url: getStoragePublicUrl(config.media.bucketId, path),
+            url: versionUrl(getStoragePublicUrl(config.media.bucketId, path), version),
           },
           thumbnail: {
             exists: false,
-            url: getStoragePublicUrl(config.media.bucketId, thumbnailPath),
+            url: versionUrl(getStoragePublicUrl(config.media.bucketId, thumbnailPath), version),
           },
         })
         onAdminError(error)
@@ -642,14 +775,15 @@ function ResourceScreen({
       setMediaStatus(null)
       return
     }
-    void refreshMediaStatus(mediaPath)
-  }, [config.media, mediaPath, refreshMediaStatus, sheetOpen])
+    void refreshMediaStatus(mediaPath, mediaVersion)
+  }, [config.media, mediaPath, mediaVersion, refreshMediaStatus, sheetOpen])
 
   const setEditorForm = (nextForm: ResourcePayload, row: AdminResourceRow | null) => {
     setEditingRow(row)
     setForm(nextForm)
     setBaselineForm(nextForm)
     setMediaStatus(null)
+    setPendingMediaFile(null)
     setFormError('')
     setSheetOpen(true)
   }
@@ -667,11 +801,22 @@ function ResourceScreen({
     setForm((current) => ({ ...current, [key]: value }))
   }
 
+  const replaceLocalRow = (row: AdminResourceRow) => {
+    const nextId = resourceId(config, row)
+    setRows((current) => {
+      const exists = current.some((candidate) => resourceId(config, candidate) === nextId)
+      return exists
+        ? current.map((candidate) => (resourceId(config, candidate) === nextId ? row : candidate))
+        : [...current, row]
+    })
+  }
+
   const closeEditor = () => {
     setSheetOpen(false)
     setDiscardPromptOpen(false)
     setEditingRow(null)
     setMediaStatus(null)
+    setPendingMediaFile(null)
     setFormError('')
   }
 
@@ -683,7 +828,23 @@ function ResourceScreen({
     closeEditor()
   }
 
-  const handleUpload = async (file: File) => {
+  const closePreview = () => {
+    // Radix restores focus after the portaled dialog closes. During that sequence the parent
+    // sheet can receive a second dismiss request, so keep the editor protected through it.
+    nestedDialogCloseGuardUntil.current = Date.now() + 500
+    setPreviewAsset(null)
+  }
+
+  const handleDiscardPromptOpenChange = (open: boolean) => {
+    if (!open) {
+      // Focus restoration from this portaled dialog can look like another outside interaction on
+      // the parent sheet. Ignore that follow-up dismiss request so the prompt stays closed.
+      nestedDialogCloseGuardUntil.current = Date.now() + 500
+    }
+    setDiscardPromptOpen(open)
+  }
+
+  const handleUpload = (file: File) => {
     if (readOnly) {
       toast.error('Local admin is read-only while connected to production data.')
       return
@@ -693,54 +854,8 @@ function ResourceScreen({
       setFormError('Select an image file. The admin generates a JPEG thumbnail automatically.')
       return
     }
-    if (file.size > 10 * 1024 * 1024) {
-      setFormError('Storage JSON uploads are limited to 10 MB. Use a smaller image for now.')
-      return
-    }
-
-    const path = String(
-      form[config.media.fieldKey] || makeStoragePath(config.media.pathPrefix, file)
-    )
-    const thumbnailPath = getThumbnailPath(path)
-    setIsSaving(true)
     setFormError('')
-    try {
-      const thumbnail = await createJpegThumbnail(file)
-      const [contentBase64, thumbnailBase64] = await Promise.all([
-        fileToBase64(file),
-        fileToBase64(thumbnail),
-      ])
-      const [originalResult, thumbnailResult] = await Promise.all([
-        api.uploadStorageObject(config.media.bucketId, {
-          path,
-          contentBase64,
-          contentType: file.type,
-          cacheControl: '3600',
-          upsert: true,
-        }),
-        api.uploadStorageObject(config.media.bucketId, {
-          path: thumbnailPath,
-          contentBase64: thumbnailBase64,
-          contentType: 'image/jpeg',
-          cacheControl: '3600',
-          upsert: true,
-        }),
-      ])
-      updateForm(config.media.fieldKey, path)
-      setMediaStatus({
-        original: { exists: true, url: originalResult.publicUrl },
-        thumbnail: { exists: true, url: thumbnailResult.publicUrl },
-      })
-      toast.success(`${config.media.label} and thumbnail uploaded`)
-    } catch (error) {
-      if (error instanceof Error && !(error instanceof AdminApiError)) {
-        setFormError(error.message)
-      } else {
-        onAdminError(error)
-      }
-    } finally {
-      setIsSaving(false)
-    }
+    setPendingMediaFile(file)
   }
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -751,25 +866,118 @@ function ResourceScreen({
     }
     setIsSaving(true)
     setFormError('')
+    let persistedRow = editingRow
     try {
+      const semesterCode = String(form.semesterName ?? '')
+        .trim()
+        .toUpperCase()
+      if (config.key === 'semesters' && !SEMESTER_CODE_PATTERN.test(semesterCode)) {
+        setFormError(
+          'Semester code must be S or F followed by the last two digits of the year, such as S26 or F27.'
+        )
+        return
+      }
+      if (needsSemesterOptions && !semesterOptions.includes(String(form.semester ?? ''))) {
+        setFormError('Choose one of the semesters created in the Semesters section.')
+        return
+      }
       const payload = preparePayload(config.fields, form)
+      if (config.key === 'semesters') payload.semesterName = semesterCode
+      if (config.key === 'events') {
+        const startTime = payload.startTime
+        const durationMinutes = Number(form.eventDuration)
+        payload.endTime =
+          typeof startTime === 'string' && startTime
+            ? new Date(new Date(startTime).getTime() + durationMinutes * 60000).toISOString()
+            : null
+      }
       if (!editingRow && config.key === 'board-members') payload.orderIndex = rows.length
+      if (config.media) delete payload[config.media.fieldKey]
 
       if (editingRow) {
-        await api.updateResource(config.key, resourceId(config, editingRow), payload)
-        toast.success(`${config.singular} updated`)
+        const updatedRow = await api.updateResource<AdminResourceRow>(
+          config.key,
+          resourceId(config, editingRow),
+          payload
+        )
+        persistedRow = { ...editingRow, ...updatedRow } as AdminResourceRow
       } else if (config.key === 'newsletter-signups') {
         await api.createNewsletterSignup(payload)
         toast.success('Newsletter subscriber added through Mailchimp')
       } else {
-        await api.createResource(config.key, payload)
-        toast.success(`${config.singular} created`)
+        persistedRow = await api.createResource<AdminResourceRow>(config.key, payload)
       }
-      setBaselineForm(form)
+
+      if (persistedRow) {
+        setEditingRow(persistedRow)
+        setBaselineForm(form)
+      }
+
+      if (pendingMediaFile && config.media) {
+        if (!persistedRow || !['events', 'board-members'].includes(config.key)) {
+          throw new Error(`Save the ${config.singular.toLowerCase()} before uploading media.`)
+        }
+
+        const id = resourceId(config, persistedRow)
+        if (!id) throw new Error(`The saved ${config.singular.toLowerCase()} did not return an ID.`)
+
+        const { fullSize, thumbnail } = await createMediaVariants(pendingMediaFile)
+        const [fullSizeBase64, thumbnailBase64] = await Promise.all([
+          fileToBase64(fullSize),
+          fileToBase64(thumbnail),
+        ])
+        const fullSizePath = makeStoragePath(id, fullSize)
+        const body: MediaReplacementBody = {
+          fullSize: {
+            path: fullSizePath,
+            contentBase64: fullSizeBase64,
+            contentType: fullSize.type,
+          },
+          thumbnail: {
+            path: getThumbnailPath(fullSizePath),
+            contentBase64: thumbnailBase64,
+            contentType: thumbnail.type,
+          },
+        }
+
+        if (getJsonByteSize(body) >= MAX_MEDIA_REQUEST_BYTES) {
+          throw new Error(
+            'The encoded full-size image and thumbnail exceed the 9.5 MB client upload limit. Choose a smaller image.'
+          )
+        }
+
+        if (config.key === 'events') {
+          const result = await api.replaceEventFlyer(id, body)
+          persistedRow = result.event
+          replaceLocalRow(result.event)
+          updateForm(config.media.fieldKey, result.event.flyerFile)
+          setMediaStatus({
+            original: { exists: true, url: result.flyer.fullSizeUrl },
+            thumbnail: { exists: true, url: result.flyer.thumbnailUrl },
+          })
+        } else {
+          const result = await api.replaceBoardHeadshot(id, body)
+          persistedRow = result.boardMember
+          replaceLocalRow(result.boardMember)
+          updateForm(config.media.fieldKey, result.boardMember.headshotFile)
+          setMediaStatus({
+            original: { exists: true, url: result.headshot.fullSizeUrl },
+            thumbnail: { exists: true, url: result.headshot.thumbnailUrl },
+          })
+        }
+        setEditingRow(persistedRow)
+        setPendingMediaFile(null)
+      }
+
+      if (config.key !== 'newsletter-signups') {
+        toast.success(`${config.singular} ${editingRow ? 'updated' : 'created'}`)
+      }
       closeEditor()
       await loadRows()
     } catch (error) {
       if (error instanceof AdminApiError && [400, 409].includes(error.status)) {
+        setFormError(error.message)
+      } else if (error instanceof Error && !(error instanceof AdminApiError)) {
         setFormError(error.message)
       } else {
         onAdminError(error)
@@ -795,25 +1003,48 @@ function ResourceScreen({
       }
       await loadRows()
     } catch (error) {
+      if (config.key === 'semesters') {
+        setDeleteTarget(null)
+        setSemesterUsageError(true)
+        setFormError(
+          error instanceof AdminApiError && error.code === 'SEMESTER_IN_USE'
+            ? error.message
+            : 'The semester could not be deleted. It may still be referenced by an event or member. Delete is now disabled; close and reopen the semester to refresh its usage.'
+        )
+        return
+      }
       onAdminError(error)
     }
   }
 
   const changeSort = (column: ColumnConfig) => {
-    setSort((current) =>
-      current.key === column.key
-        ? { key: column.key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+    onSortChange(
+      sort.key === column.key
+        ? { key: column.key, direction: sort.direction === 'asc' ? 'desc' : 'asc' }
         : { key: column.key, direction: 'asc' }
     )
   }
 
   const canReorder =
     config.key === 'board-members' &&
+    reorderMode &&
     !readOnly &&
     !isReordering &&
     !query.trim() &&
     sort.key === 'orderIndex' &&
     sort.direction === 'asc'
+
+  const enterReorderMode = () => {
+    setQuery('')
+    onSortChange({ key: 'orderIndex', direction: 'asc' })
+    setReorderMode(true)
+  }
+
+  const exitReorderMode = () => {
+    setReorderMode(false)
+    setDraggingId(null)
+    setDragTargetId(null)
+  }
 
   const reorderBoard = async (targetId: string) => {
     if (!canReorder || !draggingId || draggingId === targetId) return
@@ -837,8 +1068,17 @@ function ResourceScreen({
       (row) => previousOrder.get(resourceId(config, row)) !== Number(readRow(row, 'orderIndex'))
     )
 
-    setRows(nextRows)
+    const updateRows = () => setRows(nextRows)
+    const transitionDocument = document as Document & {
+      startViewTransition?: (update: () => void) => unknown
+    }
+    if (typeof transitionDocument.startViewTransition === 'function') {
+      transitionDocument.startViewTransition(updateRows)
+    } else {
+      updateRows()
+    }
     setDraggingId(null)
+    setDragTargetId(null)
     setIsReordering(true)
     try {
       await Promise.all(
@@ -858,6 +1098,10 @@ function ResourceScreen({
   }
 
   const hasRsvpLink = String(form.rsvpLink ?? '') !== '#' && Boolean(form.rsvpLink)
+  const semesterUsageTotal = (semesterUsage?.events ?? 0) + (semesterUsage?.members ?? 0)
+  const semesterDeleteBlocked =
+    config.key === 'semesters' &&
+    (semesterUsageLoading || semesterUsageError || !semesterUsage || semesterUsageTotal > 0)
 
   return (
     <section className="admin-section">
@@ -869,7 +1113,9 @@ function ResourceScreen({
         {config.allowCreate === false ? null : (
           <Button type="button" onClick={openCreate} disabled={readOnly}>
             <Plus data-icon="inline-start" />
-            Create {config.singular}
+            {config.key === 'newsletter-signups'
+              ? 'Subscribe through Mailchimp'
+              : `Create ${config.singular}`}
           </Button>
         )}
       </div>
@@ -882,6 +1128,7 @@ function ResourceScreen({
             placeholder={`Search ${config.title.toLowerCase()}...`}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            disabled={reorderMode}
           />
         </div>
         {config.key === 'events' ? (
@@ -898,10 +1145,28 @@ function ResourceScreen({
             </SelectContent>
           </Select>
         ) : null}
+        {config.key === 'board-members' && !readOnly ? (
+          <Button
+            type="button"
+            variant={reorderMode ? 'default' : 'outline'}
+            onClick={reorderMode ? exitReorderMode : enterReorderMode}
+            disabled={isReordering}
+          >
+            <GripVertical data-icon="inline-start" />
+            {isReordering ? 'Saving order…' : reorderMode ? 'Done reordering' : 'Reorder board'}
+          </Button>
+        ) : null}
       </div>
 
-      {config.key === 'board-members' && !canReorder && !readOnly ? (
-        <p className="table-hint">Sort Order ascending and clear search to drag board rows.</p>
+      {config.key === 'board-members' && reorderMode ? (
+        <Alert className="reorder-mode-alert">
+          <GripVertical aria-hidden="true" />
+          <AlertTitle>Reordering public board order</AlertTitle>
+          <AlertDescription>
+            This is the exact order shown on the website. Drag rows into position; each change saves
+            automatically.
+          </AlertDescription>
+        </Alert>
       ) : null}
 
       <Card className="resource-card">
@@ -928,6 +1193,7 @@ function ResourceScreen({
                         type="button"
                         className="sort-button"
                         onClick={() => changeSort(column)}
+                        disabled={reorderMode}
                       >
                         {column.label}
                         <SortIcon aria-hidden="true" />
@@ -955,8 +1221,27 @@ function ResourceScreen({
                       key={rowId}
                       draggable={canReorder}
                       data-dragging={draggingId === rowId ? 'true' : undefined}
-                      onDragStart={() => setDraggingId(rowId)}
-                      onDragEnd={() => setDraggingId(null)}
+                      data-drag-target={dragTargetId === rowId ? 'true' : undefined}
+                      style={
+                        config.key === 'board-members'
+                          ? {
+                              viewTransitionName: `board-row-${rowId.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
+                            }
+                          : undefined
+                      }
+                      onDragStart={() => {
+                        setDraggingId(rowId)
+                        setDragTargetId(null)
+                      }}
+                      onDragEnd={() => {
+                        setDraggingId(null)
+                        setDragTargetId(null)
+                      }}
+                      onDragEnter={() => {
+                        if (canReorder && draggingId && draggingId !== rowId) {
+                          setDragTargetId(rowId)
+                        }
+                      }}
                       onDragOver={(event) => canReorder && event.preventDefault()}
                       onDrop={() => void reorderBoard(rowId)}
                     >
@@ -965,14 +1250,17 @@ function ResourceScreen({
                           key={column.key}
                           className={column.kind === 'long' ? 'long-cell' : ''}
                         >
-                          {column.kind === 'order' ? (
+                          {column.kind === 'order' && reorderMode ? (
                             <span className="drag-handle" title="Drag to reorder">
                               <GripVertical aria-hidden="true" />
+                              <span>{Number(readRow(row, column.key)) + 1}</span>
                               <span className="sr-only">Drag {resourceLabel(config, row)}</span>
                             </span>
                           ) : (
                             <span className="cell-value">
-                              {displayValue(readRow(row, column.key), column.kind)}
+                              {column.kind === 'order'
+                                ? Number(readRow(row, column.key)) + 1
+                                : displayValue(readRow(row, column.key), column.kind)}
                             </span>
                           )}
                         </TableCell>
@@ -1035,19 +1323,36 @@ function ResourceScreen({
 
       <Sheet
         open={sheetOpen}
-        onOpenChange={(open) => (open ? setSheetOpen(true) : requestCloseEditor())}
+        onOpenChange={(open) => {
+          if (open) {
+            setSheetOpen(true)
+          } else if (!previewAsset && Date.now() >= nestedDialogCloseGuardUntil.current) {
+            requestCloseEditor()
+          }
+        }}
       >
-        <SheetContent className="edit-sheet">
+        <SheetContent
+          className="edit-sheet"
+          onInteractOutside={(event) => {
+            // The preview dialog is portaled outside this sheet. Its controls therefore look like
+            // outside interactions to Radix's sheet, even though the editor should remain open.
+            if (previewAsset) event.preventDefault()
+          }}
+        >
           <SheetHeader>
             <SheetTitle>
               {editingRow
                 ? `${readOnly ? 'View' : 'Edit'} ${config.singular}`
-                : `Create ${config.singular}`}
+                : config.key === 'newsletter-signups'
+                  ? 'Subscribe to newsletter'
+                  : `Create ${config.singular}`}
             </SheetTitle>
             <SheetDescription>
               {readOnly
                 ? 'Local admin is read-only while connected to production data.'
-                : 'Changes are saved through SJBA_backend_internal admin routes.'}
+                : config.key === 'newsletter-signups' && !editingRow
+                  ? 'Saving subscribes this person in Mailchimp and adds the signup to the admin database.'
+                  : 'Changes are saved via the admin API.'}
             </SheetDescription>
           </SheetHeader>
           <form className="edit-form" onSubmit={(event) => void handleSubmit(event)}>
@@ -1057,6 +1362,46 @@ function ResourceScreen({
                 <AlertTitle>Unable to save</AlertTitle>
                 <AlertDescription>{formError}</AlertDescription>
               </Alert>
+            ) : null}
+
+            {config.key === 'semesters' && editingRow ? (
+              semesterUsageLoading ? (
+                <Alert>
+                  <Loader2 className="animate-spin" aria-hidden="true" />
+                  <AlertTitle>Checking semester usage</AlertTitle>
+                  <AlertDescription>
+                    Delete remains unavailable until this check finishes.
+                  </AlertDescription>
+                </Alert>
+              ) : semesterUsageError || !semesterUsage ? (
+                <Alert variant="destructive">
+                  <ShieldAlert aria-hidden="true" />
+                  <AlertTitle>Unable to verify semester usage</AlertTitle>
+                  <AlertDescription>
+                    Delete is disabled for safety. Try closing and reopening this semester.
+                  </AlertDescription>
+                </Alert>
+              ) : semesterUsageTotal > 0 ? (
+                <Alert>
+                  <ShieldAlert aria-hidden="true" />
+                  <AlertTitle>This semester is in use</AlertTitle>
+                  <AlertDescription>
+                    {String(readRow(editingRow, 'semesterName'))} is assigned to{' '}
+                    {semesterUsage.events} {semesterUsage.events === 1 ? 'event' : 'events'} and{' '}
+                    {semesterUsage.members} {semesterUsage.members === 1 ? 'member' : 'members'}.
+                    Reassign or remove those records before deleting it. Renaming the code safely
+                    updates its references.
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <Alert>
+                  <CheckCircle2 aria-hidden="true" />
+                  <AlertTitle>Safe to delete</AlertTitle>
+                  <AlertDescription>
+                    This semester is not used by any events or members.
+                  </AlertDescription>
+                </Alert>
+              )
             ) : null}
 
             <div className="edit-form-grid">
@@ -1094,6 +1439,112 @@ function ResourceScreen({
                   )
                 }
 
+                if (field.type === 'media' && config.media) {
+                  const uploadedImageReady = Boolean(
+                    mediaStatus?.original.exists && mediaStatus.thumbnail.exists
+                  )
+                  const uploadedImageUrl = mediaStatus?.original.url ?? ''
+                  return (
+                    <div className="form-field form-field--wide" key={field.key}>
+                      <div className="media-upload">
+                        <div className="media-upload-heading">
+                          <div>
+                            <strong>{field.label}</strong>
+                          </div>
+                          {mediaStatusLoading ? <Loader2 className="animate-spin" /> : null}
+                        </div>
+
+                        {pendingMediaFile ? (
+                          <div className="media-status-item">
+                            <span className="inline-status inline-status--ok">
+                              <CheckCircle2 aria-hidden="true" />
+                              {pendingMediaFile.name} selected
+                            </span>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              disabled={readOnly || isSaving}
+                              onClick={() => setPendingMediaFile(null)}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        ) : mediaPath ? (
+                          mediaStatusLoading || !mediaStatus ? (
+                            <p>Checking uploaded image…</p>
+                          ) : (
+                            <div className="media-status-item">
+                              <span
+                                className={
+                                  uploadedImageReady
+                                    ? 'inline-status inline-status--ok'
+                                    : 'inline-status inline-status--danger'
+                                }
+                              >
+                                {uploadedImageReady ? <CheckCircle2 aria-hidden="true" /> : <X />}
+                                {uploadedImageReady ? 'Uploaded image' : 'Image unavailable'}
+                              </span>
+                              {uploadedImageReady && uploadedImageUrl ? (
+                                <div className="media-status-actions">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() =>
+                                      setPreviewAsset({
+                                        title: 'Uploaded image',
+                                        url: uploadedImageUrl,
+                                      })
+                                    }
+                                  >
+                                    <ImageIcon data-icon="inline-start" />
+                                    Preview
+                                  </Button>
+                                  <Button type="button" variant="ghost" size="icon-sm" asChild>
+                                    <a href={uploadedImageUrl} target="_blank" rel="noreferrer">
+                                      <ExternalLink aria-label="Open uploaded image" />
+                                    </a>
+                                  </Button>
+                                </div>
+                              ) : null}
+                            </div>
+                          )
+                        ) : (
+                          <p>No image is assigned yet.</p>
+                        )}
+
+                        <Input
+                          id={`${field.key}-upload`}
+                          className="sr-only"
+                          type="file"
+                          accept="image/*"
+                          disabled={readOnly || isSaving}
+                          onChange={(event) => {
+                            const file = event.target.files?.[0]
+                            if (file) handleUpload(file)
+                            event.target.value = ''
+                          }}
+                        />
+                        <Label
+                          htmlFor={`${field.key}-upload`}
+                          aria-disabled={readOnly || isSaving}
+                          className={buttonVariants({
+                            variant: 'outline',
+                            className: 'media-upload-trigger',
+                          })}
+                        >
+                          <Upload data-icon="inline-start" />
+                          {mediaPath
+                            ? `Replace ${config.media.label}`
+                            : `Upload ${config.media.label}`}
+                        </Label>
+                        <p>Save uploads the source file and a nested JPEG thumbnail together.</p>
+                      </div>
+                    </div>
+                  )
+                }
+
                 return (
                   <div
                     className={`form-field${field.wide ? ' form-field--wide' : ''}`}
@@ -1115,7 +1566,82 @@ function ResourceScreen({
                           {field.label}
                           {field.required ? <span aria-hidden="true"> *</span> : null}
                         </Label>
-                        {field.type === 'textarea' ? (
+                        {field.key === 'semester' ? (
+                          <>
+                            <Select
+                              value={String(form[field.key] ?? '')}
+                              onValueChange={(value) => updateForm(field.key, value)}
+                              disabled={
+                                readOnly || semesterOptionsLoading || !semesterOptions.length
+                              }
+                            >
+                              <SelectTrigger id={field.key} className="form-select">
+                                <SelectValue
+                                  placeholder={
+                                    semesterOptionsLoading
+                                      ? 'Loading semesters…'
+                                      : semesterOptions.length
+                                        ? 'Select a semester'
+                                        : 'No semesters created'
+                                  }
+                                />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectGroup>
+                                  {semesterOptions.map((semester) => (
+                                    <SelectItem key={semester} value={semester}>
+                                      {semester}
+                                    </SelectItem>
+                                  ))}
+                                </SelectGroup>
+                              </SelectContent>
+                            </Select>
+                            {!semesterOptionsLoading && !semesterOptions.length ? (
+                              <p className="field-help">
+                                Create a semester in the Semesters section before assigning one.
+                              </p>
+                            ) : null}
+                          </>
+                        ) : field.type === 'duration' ? (
+                          <Select
+                            value={String(form[field.key] ?? DEFAULT_EVENT_DURATION_MINUTES)}
+                            onValueChange={(value) => updateForm(field.key, Number(value))}
+                            disabled={readOnly}
+                          >
+                            <SelectTrigger id={field.key} className="form-select">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectGroup>
+                                {EVENT_DURATION_OPTIONS.map((option) => (
+                                  <SelectItem key={option.minutes} value={String(option.minutes)}>
+                                    {option.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
+                            </SelectContent>
+                          </Select>
+                        ) : config.key === 'semesters' && field.key === 'semesterName' ? (
+                          <>
+                            <Input
+                              id={field.key}
+                              value={String(form[field.key] ?? '')}
+                              onChange={(event) =>
+                                updateForm(field.key, event.target.value.toUpperCase())
+                              }
+                              required
+                              maxLength={3}
+                              placeholder="S26"
+                              autoCapitalize="characters"
+                              autoComplete="off"
+                              disabled={readOnly}
+                            />
+                            <p className="field-help">
+                              Use SYY for spring or FYY for fall, where YY is the year’s last two
+                              digits—for example, S26 or F27.
+                            </p>
+                          </>
+                        ) : field.type === 'textarea' ? (
                           <Textarea
                             id={field.key}
                             value={String(form[field.key] ?? '')}
@@ -1137,78 +1663,6 @@ function ResourceScreen({
                         )}
                       </>
                     )}
-
-                    {config.media?.fieldKey === field.key ? (
-                      <div className="media-upload">
-                        <div className="media-upload-heading">
-                          <div>
-                            <strong>Stored media</strong>
-                            <p>The original and optimized thumbnail are managed together.</p>
-                          </div>
-                          {mediaStatusLoading ? <Loader2 className="animate-spin" /> : null}
-                        </div>
-
-                        {mediaPath ? (
-                          <div className="media-status-grid">
-                            {(['original', 'thumbnail'] as const).map((assetType) => {
-                              const asset = mediaStatus?.[assetType]
-                              const title =
-                                assetType === 'original' ? 'Original image' : 'Thumbnail'
-                              return (
-                                <div className="media-status-item" key={assetType}>
-                                  <span
-                                    className={
-                                      asset?.exists
-                                        ? 'inline-status inline-status--ok'
-                                        : 'inline-status inline-status--danger'
-                                    }
-                                  >
-                                    {asset?.exists ? <CheckCircle2 aria-hidden="true" /> : <X />}
-                                    {title}
-                                  </span>
-                                  {asset?.exists && asset.url ? (
-                                    <div className="media-status-actions">
-                                      <Button
-                                        type="button"
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={() => setPreviewAsset({ title, url: asset.url })}
-                                      >
-                                        <ImageIcon data-icon="inline-start" />
-                                        Preview
-                                      </Button>
-                                      <Button type="button" variant="ghost" size="icon-sm" asChild>
-                                        <a href={asset.url} target="_blank" rel="noreferrer">
-                                          <ExternalLink aria-label={`Open ${title}`} />
-                                        </a>
-                                      </Button>
-                                    </div>
-                                  ) : null}
-                                </div>
-                              )
-                            })}
-                          </div>
-                        ) : (
-                          <p>No image is assigned yet.</p>
-                        )}
-
-                        <Label htmlFor={`${field.key}-upload`}>Upload {config.media.label}</Label>
-                        <Input
-                          id={`${field.key}-upload`}
-                          type="file"
-                          accept="image/*"
-                          disabled={readOnly || isSaving}
-                          onChange={(event) => {
-                            const file = event.target.files?.[0]
-                            if (file) void handleUpload(file)
-                          }}
-                        />
-                        <p>
-                          One image creates both the full asset and its JPEG thumbnail. JSON uploads
-                          are limited to 10 MB.
-                        </p>
-                      </div>
-                    ) : null}
                   </div>
                 )
               })}
@@ -1220,7 +1674,7 @@ function ResourceScreen({
                   type="button"
                   variant="destructive"
                   onClick={() => setDeleteTarget(editingRow)}
-                  disabled={isSaving || readOnly}
+                  disabled={isSaving || readOnly || semesterDeleteBlocked}
                 >
                   <Trash2 data-icon="inline-start" />
                   Delete
@@ -1231,14 +1685,16 @@ function ResourceScreen({
               </Button>
               <Button type="submit" disabled={isSaving || readOnly || !isDirty}>
                 {isSaving ? <Loader2 data-icon="inline-start" className="animate-spin" /> : null}
-                Save Changes
+                {config.key === 'newsletter-signups' && !editingRow
+                  ? 'Subscribe through Mailchimp'
+                  : 'Save Changes'}
               </Button>
             </SheetFooter>
           </form>
         </SheetContent>
       </Sheet>
 
-      <Dialog open={Boolean(previewAsset)} onOpenChange={(open) => !open && setPreviewAsset(null)}>
+      <Dialog open={Boolean(previewAsset)} onOpenChange={(open) => !open && closePreview()}>
         <DialogContent className="media-preview-dialog">
           <DialogHeader>
             <DialogTitle>{previewAsset?.title}</DialogTitle>
@@ -1248,7 +1704,7 @@ function ResourceScreen({
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={discardPromptOpen} onOpenChange={setDiscardPromptOpen}>
+      <AlertDialog open={discardPromptOpen} onOpenChange={handleDiscardPromptOpenChange}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
@@ -1272,13 +1728,25 @@ function ResourceScreen({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete {config.singular}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This removes {deleteTarget ? resourceLabel(config, deleteTarget) : 'this record'}{' '}
-              through the backend admin API. This action cannot be undone.
+              {config.key === 'newsletter-signups' ? (
+                <>
+                  This deletes {deleteTarget ? resourceLabel(config, deleteTarget) : 'this signup'}{' '}
+                  from the admin database only. It does not unsubscribe or remove the person from
+                  Mailchimp. This action cannot be undone.
+                </>
+              ) : (
+                <>
+                  This removes {deleteTarget ? resourceLabel(config, deleteTarget) : 'this record'}{' '}
+                  through the backend admin API. This action cannot be undone.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void confirmDelete()}>Delete</AlertDialogAction>
+            <AlertDialogAction onClick={() => void confirmDelete()}>
+              {config.key === 'newsletter-signups' ? 'Delete database row only' : 'Delete'}
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -1349,6 +1817,8 @@ function StorageScreen({
   const selectedList = Array.from(selectedPaths)
   const selectedObjects = objects.filter((object) => selectedPaths.has(object.path))
   const selectedBucket = buckets.find((bucket) => bucket.id === bucketId)
+  const mediaBucketManaged = PROTECTED_MEDIA_BUCKETS.has(bucketId)
+  const storageMutationsDisabled = readOnly || mediaBucketManaged
   const breadcrumbSegments = prefix.split('/').filter(Boolean)
 
   const joinStoragePath = (...parts: string[]) =>
@@ -1386,8 +1856,12 @@ function StorageScreen({
   }
 
   const uploadSelectedFiles = async () => {
-    if (readOnly) {
-      toast.error('Local admin is read-only while connected to production data.')
+    if (storageMutationsDisabled) {
+      toast.error(
+        mediaBucketManaged
+          ? 'Manage event flyers and board headshots from their resource editors.'
+          : 'Local admin is read-only while connected to production data.'
+      )
       return
     }
     if (!bucketId || uploadFiles.length === 0) return
@@ -1420,8 +1894,12 @@ function StorageScreen({
   }
 
   const createFolder = async () => {
-    if (readOnly) {
-      toast.error('Local admin is read-only while connected to production data.')
+    if (storageMutationsDisabled) {
+      toast.error(
+        mediaBucketManaged
+          ? 'This media bucket is managed by its paired resource endpoint.'
+          : 'Local admin is read-only while connected to production data.'
+      )
       return
     }
     const cleanName = folderName.trim()
@@ -1451,8 +1929,12 @@ function StorageScreen({
   }
 
   const moveObject = async () => {
-    if (readOnly) {
-      toast.error('Local admin is read-only while connected to production data.')
+    if (storageMutationsDisabled) {
+      toast.error(
+        mediaBucketManaged
+          ? 'This media bucket is managed by its paired resource endpoint.'
+          : 'Local admin is read-only while connected to production data.'
+      )
       return
     }
     if (!bucketId || !moveTarget || !movePath.trim()) return
@@ -1475,8 +1957,12 @@ function StorageScreen({
   }
 
   const deleteObjects = async () => {
-    if (readOnly) {
-      toast.error('Local admin is read-only while connected to production data.')
+    if (storageMutationsDisabled) {
+      toast.error(
+        mediaBucketManaged
+          ? 'This media bucket is managed by its paired resource endpoint.'
+          : 'Local admin is read-only while connected to production data.'
+      )
       return
     }
     if (!bucketId || deleteTargets.length === 0) return
@@ -1604,27 +2090,25 @@ function StorageScreen({
                     aria-label="Search storage objects"
                   />
                 </div>
-                <div className="storage-toolbar-actions">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={readOnly}
-                    onClick={() => setFolderOpen(true)}
-                  >
-                    <FolderPlus data-icon="inline-start" />
-                    Create folder
-                  </Button>
-                  <Button type="button" disabled={readOnly} onClick={() => setUploadOpen(true)}>
-                    <Upload data-icon="inline-start" />
-                    Upload files
-                  </Button>
-                </div>
+                {!storageMutationsDisabled ? (
+                  <div className="storage-toolbar-actions">
+                    <Button type="button" variant="outline" onClick={() => setFolderOpen(true)}>
+                      <FolderPlus data-icon="inline-start" />
+                      Create folder
+                    </Button>
+                    <Button type="button" onClick={() => setUploadOpen(true)}>
+                      <Upload data-icon="inline-start" />
+                      Upload files
+                    </Button>
+                  </div>
+                ) : null}
               </div>
 
-              {readOnly ? (
+              {storageMutationsDisabled ? (
                 <div className="storage-readonly-note">
-                  Production files are available to inspect. Storage changes are disabled in local
-                  read-only mode.
+                  {mediaBucketManaged
+                    ? 'These files are read-only here. Replace them from the Events or Board editor so the owning row and cache version update together. Full-size files belong at the bucket root and JPEG thumbnails belong in thumbnails/. Nested media folders are legacy and should be migrated before deletion.'
+                    : 'Production files are available to inspect. Storage changes are disabled in local read-only mode.'}
                 </div>
               ) : null}
 
@@ -1635,7 +2119,7 @@ function StorageScreen({
                     type="button"
                     variant="outline"
                     size="sm"
-                    disabled={selectedObjects.length !== 1 || readOnly}
+                    disabled={selectedObjects.length !== 1 || storageMutationsDisabled}
                     onClick={() => selectedObjects[0] && beginMove(selectedObjects[0])}
                   >
                     <Move data-icon="inline-start" />
@@ -1645,7 +2129,7 @@ function StorageScreen({
                     type="button"
                     variant="destructive"
                     size="sm"
-                    disabled={readOnly}
+                    disabled={storageMutationsDisabled}
                     onClick={() => setDeleteTargets(selectedObjects)}
                   >
                     <Trash2 data-icon="inline-start" />
@@ -1772,14 +2256,14 @@ function StorageScreen({
                                         </DropdownMenuItem>
                                       ) : null}
                                       <DropdownMenuItem
-                                        disabled={readOnly}
+                                        disabled={storageMutationsDisabled}
                                         onSelect={() => beginMove(object)}
                                       >
                                         <Move /> Rename or move
                                       </DropdownMenuItem>
                                       <DropdownMenuItem
                                         variant="destructive"
-                                        disabled={readOnly}
+                                        disabled={storageMutationsDisabled}
                                         onSelect={() => setDeleteTargets([object])}
                                       >
                                         <Trash2 /> Delete
@@ -2052,7 +2536,6 @@ function LoginScreen() {
           <strong>Admin</strong>
         </div>
         <h1>Sign in</h1>
-        <p>Use your Supabase admin credentials to manage website data.</p>
         <form className="login-form" onSubmit={(event) => void handleSubmit(event)}>
           <div className="form-field">
             <Label htmlFor="email">Email</Label>
@@ -2337,6 +2820,7 @@ function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [isCheckingSession, setIsCheckingSession] = useState(true)
   const [activeSection, setActiveSection] = useState<ActiveSection>('overview')
+  const [resourceSorts, setResourceSorts] = useState<Record<string, SortState>>({})
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [pendingNavigation, setPendingNavigation] = useState<ActiveSection | 'signout' | null>(null)
   const [safetyStatus, setSafetyStatus] = useState<LocalProductionSafetyStatus | null>(null)
@@ -2649,6 +3133,10 @@ function App() {
               api={api}
               config={activeConfig}
               onAdminError={handleAdminError}
+              sort={resourceSorts[activeConfig.key] ?? getDefaultSort(activeConfig)}
+              onSortChange={(sort) =>
+                setResourceSorts((current) => ({ ...current, [activeConfig.key]: sort }))
+              }
               readOnly={isReadOnly}
               onDirtyChange={setHasUnsavedChanges}
             />
