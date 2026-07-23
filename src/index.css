@@ -64,6 +64,26 @@ body {
   min-height: 100vh;
 }
 
+:where(
+  a[href],
+  button:not(:disabled),
+  input[type='button']:not(:disabled),
+  input[type='submit']:not(:disabled),
+  input[type='reset']:not(:disabled),
+  input[type='file']:not(:disabled),
+  label[for]:not([aria-disabled='true']),
+  select:not(:disabled),
+  summary,
+  [role='button']:not([aria-disabled='true']),
+  [role='link']:not([aria-disabled='true']),
+  [role='menuitem']:not([data-disabled]),
+  [role='option']:not([data-disabled]),
+  [role='switch']:not([data-disabled]),
+  [role='tab']:not([aria-disabled='true'])
+) {
+  cursor: pointer;
+}
+
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: 'Geist Variable', sans-serif;
