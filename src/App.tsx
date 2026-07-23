@@ -29,6 +29,7 @@ import {
   Loader2,
   LogOut,
   Mail,
+  Menu,
   MoreVertical,
   Move,
   Plus,
@@ -110,6 +111,7 @@ import {
   SheetDescription,
   SheetFooter,
   SheetHeader,
+  SheetTrigger,
   SheetTitle,
 } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -122,7 +124,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Toaster } from '@/components/ui/sonner'
@@ -571,6 +572,8 @@ function ResourceScreen({
   const [semesterUsage, setSemesterUsage] = useState<SemesterUsage | null>(null)
   const [semesterUsageLoading, setSemesterUsageLoading] = useState(false)
   const [semesterUsageError, setSemesterUsageError] = useState(false)
+  const [semesterDeleteCheckId, setSemesterDeleteCheckId] = useState<string | null>(null)
+  const [semesterDeleteNotice, setSemesterDeleteNotice] = useState('')
 
   const isDirty = useMemo(
     () =>
@@ -1004,16 +1007,64 @@ function ResourceScreen({
       await loadRows()
     } catch (error) {
       if (config.key === 'semesters') {
-        setDeleteTarget(null)
-        setSemesterUsageError(true)
-        setFormError(
+        const message =
           error instanceof AdminApiError && error.code === 'SEMESTER_IN_USE'
             ? error.message
-            : 'The semester could not be deleted. It may still be referenced by an event or member. Delete is now disabled; close and reopen the semester to refresh its usage.'
-        )
+            : 'The semester could not be deleted. It may still be referenced by an event or member.'
+        const deletingFromEditor =
+          sheetOpen &&
+          editingRow &&
+          resourceId(config, editingRow) === resourceId(config, deleteTarget)
+        setDeleteTarget(null)
+        if (deletingFromEditor) {
+          setSemesterUsageError(true)
+          setFormError(`${message} Delete is now disabled; close and reopen to refresh usage.`)
+        } else {
+          setSemesterDeleteNotice(message)
+        }
         return
       }
       onAdminError(error)
+    }
+  }
+
+  const requestDelete = async (row: AdminResourceRow) => {
+    if (readOnly) return
+    if (config.key !== 'semesters') {
+      setDeleteTarget(row)
+      return
+    }
+
+    const semesterId = resourceId(config, row)
+    const semesterCode = String(readRow(row, 'semesterName') ?? '')
+    const deletingFromEditor =
+      sheetOpen && editingRow && resourceId(config, editingRow) === semesterId
+    setSemesterDeleteCheckId(semesterId)
+    setSemesterDeleteNotice('')
+    try {
+      const usage = await api.getSemesterUsage(semesterId, semesterCode)
+      const total = usage.events + usage.members
+      if (total > 0) {
+        const message = `${semesterCode} can’t be deleted because it is assigned to ${usage.events} ${usage.events === 1 ? 'event' : 'events'} and ${usage.members} ${usage.members === 1 ? 'member' : 'members'}. Reassign or remove those records first.`
+        if (deletingFromEditor) {
+          setSemesterUsage({ events: usage.events, members: usage.members })
+        } else {
+          setSemesterDeleteNotice(message)
+        }
+        return
+      }
+      setDeleteTarget(row)
+    } catch (error) {
+      const message = 'Unable to verify semester usage. Nothing was deleted; try again.'
+      if (deletingFromEditor) {
+        setSemesterUsageError(true)
+        setFormError(message)
+      } else {
+        setSemesterDeleteNotice(message)
+      }
+      onAdminError(error)
+    } finally {
+      setSemesterDeleteCheckId(null)
     }
   }
 
@@ -1169,6 +1220,14 @@ function ResourceScreen({
         </Alert>
       ) : null}
 
+      {config.key === 'semesters' && semesterDeleteNotice ? (
+        <Alert variant="destructive">
+          <ShieldAlert aria-hidden="true" />
+          <AlertTitle>Semester wasn’t deleted</AlertTitle>
+          <AlertDescription>{semesterDeleteNotice}</AlertDescription>
+        </Alert>
+      ) : null}
+
       <Card className="resource-card">
         <CardContent className="p-0">
           <Table className="resource-table">
@@ -1289,10 +1348,10 @@ function ResourceScreen({
                               </DropdownMenuItem>
                               <DropdownMenuItem
                                 variant="destructive"
-                                disabled={readOnly}
-                                onClick={() => setDeleteTarget(row)}
+                                disabled={readOnly || semesterDeleteCheckId === rowId}
+                                onSelect={() => void requestDelete(row)}
                               >
-                                Delete
+                                {semesterDeleteCheckId === rowId ? 'Checking usage…' : 'Delete'}
                               </DropdownMenuItem>
                             </DropdownMenuGroup>
                           </DropdownMenuContent>
@@ -1673,11 +1732,18 @@ function ResourceScreen({
                 <Button
                   type="button"
                   variant="destructive"
-                  onClick={() => setDeleteTarget(editingRow)}
-                  disabled={isSaving || readOnly || semesterDeleteBlocked}
+                  onClick={() => void requestDelete(editingRow)}
+                  disabled={
+                    isSaving ||
+                    readOnly ||
+                    semesterDeleteBlocked ||
+                    semesterDeleteCheckId === resourceId(config, editingRow)
+                  }
                 >
                   <Trash2 data-icon="inline-start" />
-                  Delete
+                  {semesterDeleteCheckId === resourceId(config, editingRow)
+                    ? 'Checking usage…'
+                    : 'Delete'}
                 </Button>
               ) : null}
               <Button type="button" variant="outline" onClick={requestCloseEditor}>
@@ -2820,6 +2886,7 @@ function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [isCheckingSession, setIsCheckingSession] = useState(true)
   const [activeSection, setActiveSection] = useState<ActiveSection>('overview')
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [resourceSorts, setResourceSorts] = useState<Record<string, SortState>>({})
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [pendingNavigation, setPendingNavigation] = useState<ActiveSection | 'signout' | null>(null)
@@ -2930,6 +2997,11 @@ function App() {
     void handleSignOut()
   }
 
+  const requestMobileNavigation = (section: ActiveSection) => {
+    setMobileMenuOpen(false)
+    requestNavigation(section)
+  }
+
   const discardAndContinue = () => {
     const destination = pendingNavigation
     setHasUnsavedChanges(false)
@@ -3006,9 +3078,62 @@ function App() {
       </AlertDialog>
       <main className="dashboard-shell">
         <aside className="sidebar">
-          <div className="brand-lockup">
-            <span>SJBA</span>
-            <strong>Admin</strong>
+          <div className="sidebar-header">
+            <div className="brand-lockup">
+              <span>SJBA</span>
+              <strong>Admin</strong>
+            </div>
+            <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
+              <SheetTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="mobile-menu-trigger"
+                  aria-label="Open admin menu"
+                >
+                  <Menu aria-hidden="true" />
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="left" className="mobile-menu-sheet">
+                <SheetHeader>
+                  <SheetTitle>Admin menu</SheetTitle>
+                  <SheetDescription>Choose an object or admin tool.</SheetDescription>
+                </SheetHeader>
+                <nav className="mobile-menu-nav" aria-label="Mobile admin sections">
+                  <Button
+                    type="button"
+                    variant={activeSection === 'overview' ? 'default' : 'ghost'}
+                    onClick={() => requestMobileNavigation('overview')}
+                  >
+                    <Database data-icon="inline-start" />
+                    Overview
+                  </Button>
+                  {RESOURCE_CONFIGS.map((resource) => {
+                    const Icon = resource.icon
+                    return (
+                      <Button
+                        type="button"
+                        key={resource.key}
+                        variant={activeSection === resource.key ? 'default' : 'ghost'}
+                        onClick={() => requestMobileNavigation(resource.key)}
+                      >
+                        <Icon data-icon="inline-start" />
+                        {resource.title}
+                      </Button>
+                    )
+                  })}
+                  <Button
+                    type="button"
+                    variant={activeSection === 'storage' ? 'default' : 'ghost'}
+                    onClick={() => requestMobileNavigation('storage')}
+                  >
+                    <Folder data-icon="inline-start" />
+                    Storage
+                  </Button>
+                </nav>
+              </SheetContent>
+            </Sheet>
           </div>
           <nav className="sidebar-nav" aria-label="Admin sections">
             <Button
@@ -3097,23 +3222,6 @@ function App() {
               </div>
             </div>
           </header>
-
-          <Tabs
-            value={activeSection}
-            onValueChange={(value) => requestNavigation(value as ActiveSection)}
-            className="mobile-tabs"
-          >
-            <TabsList>
-              <TabsTrigger value="overview">Overview</TabsTrigger>
-              {RESOURCE_CONFIGS.map((resource) => (
-                <TabsTrigger key={resource.key} value={resource.key}>
-                  {resource.title}
-                </TabsTrigger>
-              ))}
-              <TabsTrigger value="storage">Storage</TabsTrigger>
-            </TabsList>
-            <TabsContent value={activeSection} />
-          </Tabs>
 
           {isLocalDev && (isSafetyChecking || isReadOnly) ? (
             <LocalSafetyNotice status={safetyStatus} />

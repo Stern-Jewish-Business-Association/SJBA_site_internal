@@ -56,6 +56,8 @@ site can label and sort every saved semester consistently.
 When an existing semester is opened, the editor checks both Events and Members and displays its
 reference counts. Delete is available only when both counts are zero. If usage cannot be verified,
 Delete remains disabled; database foreign keys provide the final safeguard against a stale check.
+The table row menu runs the same check before opening its delete confirmation and displays a visible
+table alert when the semester is still referenced.
 
 Events store a start and end time, but the editor asks for a start time and a short list of event
 lengths. The end time is calculated from those values when the event is saved, avoiding inconsistent

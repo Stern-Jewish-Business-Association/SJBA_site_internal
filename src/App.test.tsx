@@ -177,6 +177,22 @@ describe('App', () => {
     expect(within(navigation).getByRole('button', { name: /site config/i })).toBeInTheDocument()
   })
 
+  it('opens the mobile admin menu and navigates to an object', async () => {
+    authMocks.getSession.mockResolvedValue({ data: { session } })
+    const user = userEvent.setup()
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /open admin menu/i }))
+    const mobileNavigation = screen.getByRole('navigation', { name: /mobile admin sections/i })
+    await user.click(within(mobileNavigation).getByRole('button', { name: /^events$/i }))
+
+    expect(await screen.findByRole('heading', { name: /^events$/i })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('navigation', { name: /mobile admin sections/i })
+    ).not.toBeInTheDocument()
+  })
+
   it('submits Supabase password login credentials', async () => {
     authMocks.getSession.mockResolvedValue({ data: { session: null } })
     authMocks.signInWithPassword.mockResolvedValue({ error: null })
@@ -710,10 +726,25 @@ describe('App', () => {
 
     const navigation = await screen.findByRole('navigation', { name: /admin sections/i })
     await user.click(within(navigation).getByRole('button', { name: /^semesters$/i }))
+    const s26Row = await screen.findByRole('row', { name: /s26/i })
+    await user.click(within(s26Row).getByRole('button', { name: /more actions/i }))
+    await user.click(await screen.findByRole('menuitem', { name: /^delete$/i }))
+
+    expect(
+      await screen.findByText(
+        /s26 can’t be deleted because it is assigned to 2 events and 1 member/i
+      )
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog', { name: /delete semester/i })).toBeNull()
+    expect(adminApiMocks.deleteResource).not.toHaveBeenCalled()
+
     await user.click(await screen.findByRole('button', { name: /edit s26/i }))
 
-    expect(await screen.findByText(/assigned to 2 events and 1 member/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^delete$/i })).toBeDisabled()
+    const s26Editor = await screen.findByRole('dialog', { name: /edit semester/i })
+    expect(
+      await within(s26Editor).findByText(/assigned to 2 events and 1 member/i)
+    ).toBeInTheDocument()
+    expect(within(s26Editor).getByRole('button', { name: /^delete$/i })).toBeDisabled()
 
     await user.click(screen.getByRole('button', { name: /^cancel$/i }))
     await user.click(await screen.findByRole('button', { name: /edit f27/i }))
