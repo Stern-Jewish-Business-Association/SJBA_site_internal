@@ -35,6 +35,136 @@ describe('AdminApiClient', () => {
     })
   })
 
+  it('uses the filtered event total when checking semester usage', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          count: 1,
+          pagination: {
+            page: 1,
+            limit: 1,
+            total: 14,
+            totalPages: 14,
+            hasNext: true,
+            hasPrev: false,
+          },
+          data: [{ id: 'event-1', semester: 'S26' }],
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          count: 3,
+          data: [
+            { id: 'member-1', semester: 'S26' },
+            { id: 'member-2', semester: 'F26' },
+            { id: 'member-3', semester: 'S26' },
+          ],
+        })
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new AdminApiClient('/v1', () => 'access-token')
+    await expect(client.getSemesterUsage('semester-1', 'S26')).resolves.toEqual({
+      semesterId: 'semester-1',
+      events: 14,
+      members: 2,
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/events?semester=S26&limit=1',
+      expect.objectContaining({ method: 'GET' })
+    )
+  })
+
+  it('replaces event flyers through the paired versioned-media endpoint', async () => {
+    const body = {
+      fullSize: {
+        path: 'event-1.webp',
+        contentBase64: 'full',
+        contentType: 'image/webp',
+      },
+      thumbnail: {
+        path: 'thumbnails/event-1.jpg',
+        contentBase64: 'thumb',
+        contentType: 'image/jpeg',
+      },
+    }
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        success: true,
+        data: {
+          event: { id: 'event-1', flyerFile: body.fullSize.path },
+          flyer: {
+            fullSizePath: body.fullSize.path,
+            thumbnailPath: body.thumbnail.path,
+            fullSizeUrl: 'https://example.com/full?v=1',
+            thumbnailUrl: 'https://example.com/thumb?v=1',
+          },
+        },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new AdminApiClient('/v1', () => 'access-token')
+    await client.replaceEventFlyer('event-1', body)
+
+    expect(fetchMock).toHaveBeenCalledWith('/v1/events/event-1/flyer', {
+      method: 'PUT',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer access-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+  })
+
+  it('replaces board headshots through the paired versioned-media endpoint', async () => {
+    const body = {
+      fullSize: {
+        path: 'member-1.webp',
+        contentBase64: 'full',
+        contentType: 'image/webp',
+      },
+      thumbnail: {
+        path: 'thumbnails/member-1.jpg',
+        contentBase64: 'thumb',
+        contentType: 'image/jpeg',
+      },
+    }
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        success: true,
+        data: {
+          boardMember: { id: 'member-1', headshotFile: body.fullSize.path },
+          headshot: {
+            fullSizePath: body.fullSize.path,
+            thumbnailPath: body.thumbnail.path,
+            fullSizeUrl: 'https://example.com/full?v=1',
+            thumbnailUrl: 'https://example.com/thumb?v=1',
+          },
+        },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new AdminApiClient('/v1', () => 'access-token')
+    await client.replaceBoardHeadshot('member-1', body)
+
+    expect(fetchMock).toHaveBeenCalledWith('/v1/board-members/member-1/headshot', {
+      method: 'PUT',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer access-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+  })
+
   it('classifies 401 responses as unauthenticated', async () => {
     vi.stubGlobal(
       'fetch',

@@ -1,6 +1,9 @@
 import type {
   AdminResourceKey,
   ApiEnvelope,
+  BoardHeadshotReplacement,
+  EventFlyerReplacement,
+  MediaReplacementBody,
   ResourcePayload,
   StorageBucket,
   StorageDeleteBody,
@@ -311,6 +314,22 @@ export class AdminApiClient {
     return response.data as T[]
   }
 
+  async getSemesterUsage(semesterId: string, semesterCode: string) {
+    const [eventsResponse, members] = await Promise.all([
+      this.request<ApiEnvelope<unknown[]>>(
+        `events?semester=${encodeURIComponent(semesterCode)}&limit=1`
+      ),
+      this.listResource<Record<string, unknown>>('members'),
+    ])
+
+    return {
+      semesterId,
+      events:
+        eventsResponse.pagination?.total ?? eventsResponse.count ?? eventsResponse.data.length,
+      members: members.filter((member) => member.semester === semesterCode).length,
+    }
+  }
+
   async createResource<T>(resource: AdminResourceKey, payload: ResourcePayload): Promise<T> {
     this.assertWritesAllowed()
     const response = await this.request<ApiEnvelope<T>>(resource, {
@@ -351,6 +370,24 @@ export class AdminApiClient {
     const response = await this.request<ApiEnvelope<T>>(`${resource}/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     })
+    return response.data
+  }
+
+  async replaceEventFlyer(id: string, body: MediaReplacementBody) {
+    this.assertWritesAllowed()
+    const response = await this.request<ApiEnvelope<EventFlyerReplacement>>(
+      `events/${encodeURIComponent(id)}/flyer`,
+      { method: 'PUT', body }
+    )
+    return response.data
+  }
+
+  async replaceBoardHeadshot(id: string, body: MediaReplacementBody) {
+    this.assertWritesAllowed()
+    const response = await this.request<ApiEnvelope<BoardHeadshotReplacement>>(
+      `board-members/${encodeURIComponent(id)}/headshot`,
+      { method: 'PUT', body }
+    )
     return response.data
   }
 

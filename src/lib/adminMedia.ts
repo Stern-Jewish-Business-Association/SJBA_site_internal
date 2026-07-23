@@ -1,25 +1,24 @@
 const THUMBNAIL_MAX_DIMENSION = 720
 const THUMBNAIL_QUALITY = 0.82
+const JPEG_CONTENT_TYPE = 'image/jpeg'
 
-const fileExtension = (fileName: string) => {
-  const match = fileName.match(/(\.[A-Za-z0-9]+)$/)
-  return match?.[1]?.toLowerCase() ?? ''
+const fileExtension = (file: File) => {
+  const extension = file.name.match(/(\.[A-Za-z0-9]+)$/)?.[1]?.toLowerCase()
+  if (extension) return extension
+  if (file.type === 'image/jpeg') return '.jpg'
+  const subtype = file.type.split('/')[1]?.replace('svg+xml', 'svg')
+  return subtype ? `.${subtype}` : ''
 }
 
-export const makeStoragePath = (prefix: string, file: File) => {
-  const safeName = file.name
-    .trim()
-    .replace(/\s+/g, '-')
-    .replace(/[^A-Za-z0-9._/-]/g, '')
-    .toLowerCase()
-
-  return `${prefix}/${Date.now()}-${safeName || 'image'}`
-}
+export const makeStoragePath = (resourceId: string, file: File) =>
+  `${resourceId}${fileExtension(file)}`
 
 export const getThumbnailPath = (path: string) => {
-  const extension = fileExtension(path)
-  const withoutExtension = extension ? path.slice(0, -extension.length) : path
-  return `thumbnails/${withoutExtension}.jpg`
+  const index = path.lastIndexOf('/')
+  const directory = index === -1 ? '' : `${path.slice(0, index)}/`
+  const filename = path.slice(index + 1)
+  const baseName = filename.replace(/\.[^/.]+$/, '')
+  return `${directory}thumbnails/${baseName}.jpg`
 }
 
 export const getStoragePublicUrl = (bucketId: string, path: string) => {
@@ -31,6 +30,13 @@ export const getStoragePublicUrl = (bucketId: string, path: string) => {
     .map((segment) => encodeURIComponent(segment))
     .join('/')
   return `${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(bucketId)}/${encodedPath}`
+}
+
+export const versionUrl = (publicUrl: string, version: string) => {
+  if (!publicUrl || !version) return publicUrl
+  const url = new URL(publicUrl, window.location.origin)
+  url.searchParams.set('v', version)
+  return url.toString()
 }
 
 const loadImage = async (file: File): Promise<ImageBitmap | HTMLImageElement> => {
@@ -53,24 +59,24 @@ const loadImage = async (file: File): Promise<ImageBitmap | HTMLImageElement> =>
   })
 }
 
-export const createJpegThumbnail = async (file: File): Promise<File> => {
+export const getJsonByteSize = (body: unknown) => new Blob([JSON.stringify(body)]).size
+
+export const createJpegThumbnail = async (file: File) => {
   if (!file.type.startsWith('image/')) {
-    throw new Error('Select an image file to generate a thumbnail.')
+    throw new Error('Select an image file to upload.')
   }
 
   const image = await loadImage(file)
-  const sourceWidth = image.width
-  const sourceHeight = image.height
-  const scale = Math.min(1, THUMBNAIL_MAX_DIMENSION / Math.max(sourceWidth, sourceHeight))
-  const width = Math.max(1, Math.round(sourceWidth * scale))
-  const height = Math.max(1, Math.round(sourceHeight * scale))
+  const scale = Math.min(1, THUMBNAIL_MAX_DIMENSION / Math.max(image.width, image.height))
+  const width = Math.max(1, Math.round(image.width * scale))
+  const height = Math.max(1, Math.round(image.height * scale))
   const canvas = document.createElement('canvas')
   canvas.width = width
   canvas.height = height
 
   const context = canvas.getContext('2d')
   if (!context) {
-    throw new Error('This browser cannot create image thumbnails.')
+    throw new Error('This browser cannot process image uploads.')
   }
 
   context.fillStyle = '#ffffff'
@@ -81,11 +87,23 @@ export const createJpegThumbnail = async (file: File): Promise<File> => {
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
       (result) => (result ? resolve(result) : reject(new Error('Thumbnail generation failed.'))),
-      'image/jpeg',
+      JPEG_CONTENT_TYPE,
       THUMBNAIL_QUALITY
     )
   })
+  if (blob.type !== JPEG_CONTENT_TYPE) {
+    throw new Error('This browser cannot create JPEG thumbnails.')
+  }
+  const baseName = file.name.replace(/\.[^.]+$/, '') || 'thumbnail'
+  return new File([blob], `${baseName}.jpg`, { type: JPEG_CONTENT_TYPE })
+}
 
-  const thumbnailName = `${file.name.replace(/\.[^.]+$/, '') || 'thumbnail'}.jpg`
-  return new File([blob], thumbnailName, { type: 'image/jpeg' })
+export const createMediaVariants = async (file: File) => {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Select an image file to upload.')
+  }
+  return {
+    fullSize: file,
+    thumbnail: await createJpegThumbnail(file),
+  }
 }

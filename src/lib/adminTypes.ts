@@ -32,6 +32,7 @@ export interface BoardMember {
   linkedinUrl: string | null
   email: string
   headshotFile: string | null
+  headshotUpdatedAt: string
   orderIndex: number
 }
 
@@ -112,6 +113,34 @@ export interface StorageUploadBody {
   contentType?: string
   cacheControl?: string
   upsert?: boolean
+}
+
+export interface MediaVariantBody {
+  path: string
+  contentBase64: string
+  contentType: string
+}
+
+export interface MediaReplacementBody {
+  fullSize: MediaVariantBody
+  thumbnail: MediaVariantBody
+}
+
+export interface VersionedMediaReplacement {
+  fullSizePath: string
+  thumbnailPath: string
+  fullSizeUrl: string
+  thumbnailUrl: string
+}
+
+export interface EventFlyerReplacement {
+  event: Event
+  flyer: VersionedMediaReplacement
+}
+
+export interface BoardHeadshotReplacement {
+  boardMember: BoardMember
+  headshot: VersionedMediaReplacement
 }
 
 export interface StorageUpdateBody {
