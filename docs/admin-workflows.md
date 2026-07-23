@@ -11,27 +11,55 @@ missing site-config key or update the existing key through `/v1/site-config`.
 
 ## Event And Board Media
 
-Event flyers and board headshots are uploaded only through the backend Storage admin routes. The
-browser never writes directly to Supabase Storage.
+Event flyers and board headshots are replaced only through their paired backend routes:
+`PUT /v1/events/{id}/flyer` and `PUT /v1/board-members/{id}/headshot`. The generic Storage browser is
+read-only for both media buckets. Editors manage the image without editing paths or filenames.
 
-One selected image produces two uploads:
+Saving a selected image sends two variants in one JSON request:
 
-- the original image at the path saved in `flyerFile` or `headshotFile`
-- a generated JPEG thumbnail at `thumbnails/<original path with .jpg extension>`
+- the original full-size image at the path saved in `flyerFile` or `headshotFile`
+- a generated JPEG thumbnail with `thumbnails/` inserted immediately before the filename
 
-This matches the public frontend's URL convention. For example:
+Paths are deterministic from the owning resource UUID:
 
 ```text
-events/spring-panel.png
-thumbnails/events/spring-panel.jpg
+event-flyers bucket:
+{eventId}.<source extension>
+thumbnails/{eventId}.jpg
+
+board-headshots bucket:
+{boardMemberId}.<source extension>
+thumbnails/{boardMemberId}.jpg
 ```
 
-The editor verifies both paths through the backend object-listing route and provides previews and
-direct links. The current backend accepts base64 content in JSON, so the documented 10 MB JSON body
-limit still applies.
+The bucket name already identifies the media type, so the admin does not add redundant `events/`
+or `members/` directories. Thumbnail lookup remains compatible with older nested paths if any are
+encountered.
 
-The two Storage writes are separate HTTP operations because the backend does not currently expose an
-atomic paired-media endpoint. The database field is updated only after both upload requests succeed.
+For new events and board members, the editor creates the database row first, obtains its UUID, and
+then calls the paired media route. A failed media request leaves the editor open with the selected
+file so retrying is safe. The editor measures the complete base64 JSON request and applies a 9.5 MB
+client ceiling, leaving headroom below the backend's 10 MB body limit.
+
+The paired endpoint uploads both variants before changing the owning row. Preview URLs use the
+versioned URLs returned by that endpoint or append the owning row's `updatedAt` (events) or
+`headshotUpdatedAt` (board members) after a fresh fetch. Storage object timestamps are never used as
+cache versions.
+
+## Semesters And Event Length
+
+Event and member semester fields are dropdowns populated from the Semesters collection. Admins must
+create a semester before assigning it; arbitrary semester values cannot be entered in these editors.
+Semester creation accepts only `SYY` and `FYY` codes (for example, `S26` or `F27`) so the public
+site can label and sort every saved semester consistently.
+
+When an existing semester is opened, the editor checks both Events and Members and displays its
+reference counts. Delete is available only when both counts are zero. If usage cannot be verified,
+Delete remains disabled; database foreign keys provide the final safeguard against a stale check.
+
+Events store a start and end time, but the editor asks for a start time and a short list of event
+lengths. The end time is calculated from those values when the event is saved, avoiding inconsistent
+date ranges.
 
 ## Newsletter Signups
 
