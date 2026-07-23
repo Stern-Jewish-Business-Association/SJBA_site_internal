@@ -5,6 +5,28 @@ The admin panel can run locally with `npm run dev` for development and productio
 Local development must never accidentally write to the production database. The app therefore runs a
 startup safety check before mounting admin data screens.
 
+## Creating A Local Admin User
+
+1. Start the local Supabase stack and open its Studio dashboard.
+2. In **Authentication** > **Users**, create a new user with the email address and password you will
+   use to sign in to the local admin panel.
+3. In the local Supabase SQL Editor, run the following query, replacing `{email}` with that user's
+   email address:
+
+```sql
+update auth.users
+set raw_app_meta_data =
+  coalesce(raw_app_meta_data, '{}'::jsonb) || '{"admin": true}'::jsonb
+where email = '{email}';
+```
+
+4. Sign out and sign back in to the admin panel (or refresh the user's session) so the updated admin
+   claim is present in the access token.
+
+Use `raw_app_meta_data` for this authorization claim, not `raw_user_meta_data`; user metadata can be
+changed by the user and must not grant admin access. Confirm that the query affects exactly one row
+before relying on the account.
+
 ## Local Read-Only Mode
 
 When the admin panel is running in Vite dev mode, it becomes read-only if any safety check indicates
